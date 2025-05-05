@@ -42,9 +42,9 @@ jobs:
           CALDAV_SERVER_URL: ${{ secrets.CALDAV_SERVER_URL }}
         run: node index.mjs
 
-      - name: Commit and push if changed
+      - name: Push to another repository
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add filtered.ics
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update filtered.ics" && git push -f origin main) 
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update filtered.ics" && git push -f https://${{ secrets.TARGET_REPO_TOKEN }}@github.com/${{ secrets.TARGET_REPO_NAME  }}.git ics) 
