@@ -28,6 +28,11 @@ jobs:
         run: pnpm install
 
       - name: Run script
+        env:
+          GITHUB_ACTIONS: true
+          CALDAV_USERNAME: ${{ secrets.CALDAV_USERNAME }}
+          CALDAV_PASSWORD: ${{ secrets.CALDAV_PASSWORD }}
+          CALDAV_SERVER_URL: ${{ secrets.CALDAV_SERVER_URL }}
         run: node index.mjs
 
       - name: Commit and push if changed
