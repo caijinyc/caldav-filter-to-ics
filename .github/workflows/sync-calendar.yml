@@ -44,8 +44,22 @@ jobs:
 
       - name: Push to another repository
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+
+          if [ ! -f filtered.ics ]; then
+            echo "filtered.ics not found!"
+            exit 1
+          fi
+
+          git clone https://${{ secrets.TARGET_REPO_TOKEN }}@github.com/${{ secrets.TARGET_REPO_NAME }}.git target-repo
+          cp filtered.ics target-repo/
+          cd target-repo
+
           git add filtered.ics
-          echo "Target repository: ${{ secrets.TARGET_REPO_NAME }}"
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update filtered.ics" && git push -f https://${{ secrets.TARGET_REPO_TOKEN }}@github.com/${{ secrets.TARGET_REPO_NAME }}.git) 
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update filtered.ics"
+            git push
+          fi
