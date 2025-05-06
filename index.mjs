@@ -1,17 +1,10 @@
-/**
- *
- * ✅ 从 CalDAV 拉取数据；
- * ✅ 本地解析并按规则过滤事件；
- * ✅ 将这些过滤后的事件重新生成为一个 .ics 文件；
- * ✅ 输出到当前目录的 filtered.ics 文件中
- */
-
 import { createDAVClient } from "tsdav";
 import icalGen from "ical-generator";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const IcalExpander = require("ical-expander");
+const ICAL = require("ical.js");
 import fs from "node:fs";
+import { fileURLToPath } from "url";
 
 import { FILTER_CONFIG } from "./FILTER_CONFIG.mjs";
 
@@ -69,54 +62,86 @@ async function fetchAndFilterEvents() {
 
   for (const obj of allCalendarObjects) {
     try {
-      const expander = new IcalExpander({
-        ics: obj.data,
-        maxIterations: 1000,
-      });
+      let parsedEvent = null;
 
-      const { occurrences } = expander.between(RANGE_START, RANGE_END);
+      // 使用 ical.js 解析
+      const jcalData = ICAL.parse(obj.data);
+      const comp = new ICAL.Component(jcalData);
+      const vevent = comp.getFirstSubcomponent("vevent");
 
-      occurrences.forEach(({ item, startDate, endDate }) => {
-        let isMatch = true;
+      if (vevent) {
+        parsedEvent = new ICAL.Event(vevent);
 
-        for (const field of filterFields) {
-          const value = item[field];
-          if (value) {
-            if (
-              filterRules.some((rule) => {
-                if (Array.isArray(rule[field])) {
-                  return rule[field].some((r) => value.includes(r));
+        // 处理事件（重复和非重复）
+        const processEvent = (startDate, endDate) => {
+          if (startDate >= RANGE_START && endDate <= RANGE_END) {
+            let isMatch = true;
+            const item = {
+              summary: parsedEvent.summary,
+              description: parsedEvent.description,
+              location: parsedEvent.location,
+              uid: parsedEvent.uid,
+              organizer: parsedEvent.organizer?.val,
+            };
+
+            for (const field of filterFields) {
+              const value = item[field];
+              if (value) {
+                if (
+                  filterRules.some((rule) => {
+                    if (Array.isArray(rule[field])) {
+                      return rule[field].some((r) => value.includes(r));
+                    }
+                    return value.includes(rule[field]);
+                  })
+                ) {
+                  isMatch = false;
                 }
+              }
+            }
 
-                return value.includes(rule[field]);
-              })
-            ) {
-              isMatch = false;
+            if (isMatch) {
+              filteredEvents.push({
+                start: startDate,
+                end: endDate,
+                summary: item.summary,
+                description: item.description,
+                location: item.location,
+                uid: item.uid,
+                organizer: item.organizer?.val,
+              });
             }
           }
-        }
+        };
 
-        if (isMatch) {
-          filteredEvents.push({
-            start: startDate.toJSDate(),
-            end: endDate.toJSDate(),
-            summary: item.summary,
-            description: item.description,
-            location: item.location,
-            uid: item.uid,
-            organizer: item.organizer?.val,
-          });
+        // 处理重复事件
+        if (parsedEvent.isRecurring()) {
+          const iterator = parsedEvent.iterator();
+          let next;
+
+          while ((next = iterator.next()) && next.toJSDate() <= RANGE_END) {
+            const startDate = next.toJSDate();
+            const endDate = parsedEvent
+              .getOccurrenceDetails(next)
+              .endDate.toJSDate();
+            processEvent(startDate, endDate);
+          }
+        } else {
+          // 处理非重复事件
+          const startDate = parsedEvent.startDate.toJSDate();
+          const endDate = parsedEvent.endDate.toJSDate();
+          processEvent(startDate, endDate);
         }
-      });
+      }
     } catch (err) {
-      console.warn("⚠️ Failed to parse calendar object:", err.message);
+      console.log("⚠️ Failed to parse calendar object:", err);
     }
   }
 
   return filteredEvents;
 }
 
-const getFilteredCal = async () => {
+export const getFilteredCal = async () => {
   const events = await fetchAndFilterEvents();
   const cal = icalGen({ name: "Filtered Calendar" });
 
@@ -135,15 +160,22 @@ const getFilteredCal = async () => {
   return cal;
 };
 
-try {
-  console.log("### -> start targetFilteredCal");
+const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 
-  const cal = await getFilteredCal();
+console.log("### -> isDirectRun", isDirectRun);
 
-  console.log("### -> end targetFilteredCal");
+if (isDirectRun) {
+  try {
+    console.log("### -> start targetFilteredCal");
 
-  fs.writeFileSync("filtered.ics", cal.toString());
-} catch (err) {
-  console.error("Error:", err);
-  process.exit(1);
+    const cal = await getFilteredCal();
+
+    console.log("### -> end targetFilteredCal");
+
+    fs.writeFileSync("filtered.ics", cal.toString());
+  } catch (err) {
+    console.error("Error:", err);
+    process.exit(1);
+  }
 }
+

@@ -1,34 +1,10 @@
 import express from "express";
-import { createDAVClient } from "tsdav";
-import icalGen from "ical-generator";
-import { createRequire } from "node:module";
-const require = createRequire(import.meta.url);
-const IcalExpander = require("ical-expander");
 import dotenv from "dotenv";
 import fs from "fs";
-
-import { FILTER_CONFIG } from "./FILTER_CONFIG.mjs";
+import { getFilteredCal } from "./index.mjs";
 
 // 加载本地 .env 配置
 dotenv.config();
-
-// 时间范围配置
-const RANGE_START = FILTER_CONFIG.range.start;
-const RANGE_END = FILTER_CONFIG.range.end;
-
-// 判断是否在 GitHub Actions 环境
-const isGithubActions = process.env.GITHUB_ACTIONS === "true";
-
-// CalDAV 配置
-const CALDAV_CONFIG = {
-  serverUrl: isGithubActions ? process.env.CALDAV_SERVER_URL : process.env.URL,
-  credentials: {
-    username: isGithubActions ? process.env.CALDAV_USERNAME : process.env.USERNAME,
-    password: isGithubActions ? process.env.CALDAV_PASSWORD : process.env.PASSWORD,
-  },
-};
-
-const { filterFields, filterRules } = FILTER_CONFIG;
 
 // 5 分钟缓存机制
 let cachedICS = null;
@@ -51,7 +27,17 @@ function requestLogger(req, res, next) {
 
   const logEntry = `${timestamp} | ${ip} | ${method} ${path} | ${userAgent}\n`;
 
-  // 异步写入日志，不阻塞请求处理
+  if (!fs.existsSync(LOG_FILE_PATH)) {
+    fs.writeFileSync(LOG_FILE_PATH, "");
+  }
+
+  const logFileSize = fs.statSync(LOG_FILE_PATH).size;
+
+  // 异步写入日志，不阻塞请求处理，当文件超过  20MB，重置文件
+  if (logFileSize > 10 * 1024 * 1024) {
+    fs.writeFileSync(LOG_FILE_PATH, "");
+  }
+
   fs.appendFile(LOG_FILE_PATH, logEntry, (err) => {
     if (err) {
       console.error("❌ Error writing to log file:", err);
@@ -61,104 +47,6 @@ function requestLogger(req, res, next) {
   next();
 }
 
-// 拉取并过滤事件
-async function fetchAndFilterEvents() {
-  const client = await createDAVClient({
-    ...CALDAV_CONFIG,
-    authMethod: "Basic",
-    defaultAccountType: "caldav",
-  });
-
-  const calendars = await client.fetchCalendars();
-
-  const calendarObjectsPromises = calendars.map((calendar) =>
-    client.fetchCalendarObjects({ calendar })
-  );
-
-  const allCalendarObjects = (await Promise.all(calendarObjectsPromises)).flat();
-
-  const filteredEvents = [];
-  const skippedEvents = [];
-
-  for (const obj of allCalendarObjects) {
-    try {
-      const expander = new IcalExpander({
-        ics: obj.data,
-        maxIterations: 1000,
-      });
-
-      const { occurrences } = expander.between(RANGE_START, RANGE_END);
-
-      occurrences.forEach(({ item, startDate, endDate }) => {
-        let isMatch = true;
-
-        for (const field of filterFields) {
-          const value = item[field];
-          if (value) {
-            if (
-              filterRules.some((rule) => {
-                if (Array.isArray(rule[field])) {
-                  return rule[field].some((r) => value.includes(r));
-                }
-                return value.includes(rule[field]);
-              })
-            ) {
-              isMatch = false;
-            }
-          }
-        }
-
-        if (isMatch) {
-          filteredEvents.push({
-            start: startDate.toJSDate(),
-            end: endDate.toJSDate(),
-            summary: item.summary,
-            description: item.description,
-            location: item.location,
-            uid: item.uid,
-            organizer: item.organizer?.val,
-          });
-        } else {
-          skippedEvents.push({
-            start: startDate.toJSDate(),
-            end: endDate.toJSDate(),
-            summary: item.summary,
-            description: item.description,
-            location: item.location,
-            uid: item.uid,
-          });
-        
-        }
-      });
-    } catch (err) {
-      console.warn("⚠️ Failed to parse calendar object:", err.message);
-    }
-  }
-
-  // fs.writeFileSync("skipped-events.json", JSON.stringify(skippedEvents, null, 2));
-
-  return filteredEvents;
-}
-
-// 构造过滤后的 ics 日历
-async function getFilteredCal() {
-  const events = await fetchAndFilterEvents();
-  const cal = icalGen({ name: "Filtered Calendar " + new Date().toISOString() });
-
-  for (const e of events) {
-    cal.createEvent({
-      start: e.start,
-      end: e.end,
-      summary: e.summary,
-      description: e.description,
-      location: e.location,
-      uid: e.uid,
-      organizer: e.organizer,
-    });
-  }
-
-  return cal;
-}
 
 // 定时更新缓存
 async function updateCache() {
@@ -176,7 +64,7 @@ async function updateCache() {
 
 // 启动 Express 应用
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // 使用请求日志中间件
 app.use(requestLogger);
