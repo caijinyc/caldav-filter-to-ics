@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const IcalExpander = require("ical-expander");
 import dotenv from "dotenv";
+import fs from "fs";
 
 import { FILTER_CONFIG } from "./FILTER_CONFIG.mjs";
 
@@ -34,6 +35,32 @@ let cachedICS = null;
 let lastGeneratedTime = 0;
 const CACHE_TTL = 5 * 60 * 1000; // 5分钟
 
+// 日志文件路径
+const LOG_FILE_PATH = "api-requests.log";
+
+// 请求日志中间件
+function requestLogger(req, res, next) {
+  const timestamp = new Date().toISOString();
+  const ip = req.headers['x-forwarded-for'] || 
+             req.socket.remoteAddress || 
+             req.connection.remoteAddress || 
+             req.ip;
+  const method = req.method;
+  const path = req.path;
+  const userAgent = req.get("user-agent") || "unknown";
+
+  const logEntry = `${timestamp} | ${ip} | ${method} ${path} | ${userAgent}\n`;
+
+  // 异步写入日志，不阻塞请求处理
+  fs.appendFile(LOG_FILE_PATH, logEntry, (err) => {
+    if (err) {
+      console.error("❌ Error writing to log file:", err);
+    }
+  });
+
+  next();
+}
+
 // 拉取并过滤事件
 async function fetchAndFilterEvents() {
   const client = await createDAVClient({
@@ -51,6 +78,7 @@ async function fetchAndFilterEvents() {
   const allCalendarObjects = (await Promise.all(calendarObjectsPromises)).flat();
 
   const filteredEvents = [];
+  const skippedEvents = [];
 
   for (const obj of allCalendarObjects) {
     try {
@@ -90,6 +118,16 @@ async function fetchAndFilterEvents() {
             uid: item.uid,
             organizer: item.organizer?.val,
           });
+        } else {
+          skippedEvents.push({
+            start: startDate.toJSDate(),
+            end: endDate.toJSDate(),
+            summary: item.summary,
+            description: item.description,
+            location: item.location,
+            uid: item.uid,
+          });
+        
         }
       });
     } catch (err) {
@@ -97,13 +135,15 @@ async function fetchAndFilterEvents() {
     }
   }
 
+  // fs.writeFileSync("skipped-events.json", JSON.stringify(skippedEvents, null, 2));
+
   return filteredEvents;
 }
 
 // 构造过滤后的 ics 日历
 async function getFilteredCal() {
   const events = await fetchAndFilterEvents();
-  const cal = icalGen({ name: "Filtered Calendar" });
+  const cal = icalGen({ name: "Filtered Calendar " + new Date().toISOString() });
 
   for (const e of events) {
     cal.createEvent({
@@ -120,9 +160,33 @@ async function getFilteredCal() {
   return cal;
 }
 
+// 定时更新缓存
+async function updateCache() {
+  try {
+    console.log("🔄 Scheduled cache update started");
+    const cal = await getFilteredCal();
+    const icsString = cal.toString();
+    cachedICS = icsString;
+    lastGeneratedTime = Date.now();
+    console.log("✅ Cache updated successfully");
+  } catch (err) {
+    console.error("❌ Error updating cache:", err);
+  }
+}
+
 // 启动 Express 应用
 const app = express();
 const PORT = 3000;
+
+// 使用请求日志中间件
+app.use(requestLogger);
+
+// 设置定时任务，每5分钟更新一次缓存
+const CACHE_UPDATE_INTERVAL = 5 * 60 * 1000; // 5分钟
+setInterval(updateCache, CACHE_UPDATE_INTERVAL);
+
+// 启动时立即更新一次缓存
+updateCache();
 
 app.get("/filtered.ics", async (req, res) => {
   const now = Date.now();
