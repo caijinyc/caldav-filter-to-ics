@@ -8,6 +8,7 @@ lerna-debug.log*
 .pnpm-debug.log*
 skipped-events.json
 api-requests.log
+log/
 
 .env
 
