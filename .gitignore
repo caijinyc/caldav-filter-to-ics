@@ -9,6 +9,7 @@ lerna-debug.log*
 skipped-events.json
 api-requests.log
 log/
+FILTER_CONFIG.mjs
 
 .env
 
