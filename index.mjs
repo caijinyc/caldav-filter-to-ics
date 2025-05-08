@@ -1,20 +1,17 @@
 import { createDAVClient } from "tsdav";
 import icalGen from "ical-generator";
+import fs from "fs";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const ICAL = require("ical.js");
-import fs from "node:fs";
-import { fileURLToPath } from "url";
 import { FILTER_CONFIG } from "./FILTER_CONFIG.mjs";
+import { fileURLToPath } from "url";
 
 const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 
-// 设置时间范围（展开重复事件时必须）
-const RANGE_START = FILTER_CONFIG.range.start;
-const RANGE_END = FILTER_CONFIG.range.end;
-
-// 判断是否为 github actions 环境
-const isGithubActions = process.env.GITHUB_ACTIONS === "true";
+// // 设置时间范围（展开重复事件时必须）
+// const RANGE_START = FILTER_CONFIG.range.start;
+// const RANGE_END = FILTER_CONFIG.range.end;
 
 // 读取 .env 文件中的配置
 const localEnv = require("dotenv").config();
@@ -22,12 +19,6 @@ const localEnv = require("dotenv").config();
 let CALDAV_USERNAME = localEnv.parsed.USERNAME;
 let CALDAV_PASSWORD = localEnv.parsed.PASSWORD;
 let CALDAV_SERVER_URL = localEnv.parsed.URL;
-
-if (isGithubActions) {
-  CALDAV_USERNAME = process.env.CALDAV_USERNAME;
-  CALDAV_PASSWORD = process.env.CALDAV_PASSWORD;
-  CALDAV_SERVER_URL = process.env.CALDAV_SERVER_URL;
-}
 
 const CALDAV_CONFIG = {
   serverUrl: CALDAV_SERVER_URL,
@@ -39,149 +30,195 @@ const CALDAV_CONFIG = {
 
 console.log("### -> CALDAV_CONFIG", CALDAV_CONFIG);
 
-const { filterFields, filterRules } = FILTER_CONFIG;
+export async function getFilteredCal({ filterConfig }) {
+  const getIsMatch = ({ summary, description }) => {
+    const { filter } = filterConfig;
 
-async function fetchAndFilterEvents() {
+    if (!summary) {
+      return false;
+    }
+
+    // 没法判断，因为在群组里面的人拿不到状态
+    // if (accepted) {
+    //   return true;
+    // }
+
+    // 过滤 summary
+    if (
+      filter.summary.some((item) => {
+        return summary.includes(item);
+      })
+    ) {
+      return false;
+    }
+
+    // 过滤 description
+    if (
+      description &&
+      filter.description.some((item) => {
+        return description.includes(item);
+      })
+    ) {
+      return false;
+    }
+
+    //   const declined = event.component
+    //     ?.getAllProperties("attendee")
+    //     ?.some((p) => p.getParameter("partstat") === "DECLINED");
+
+    //   if (declined) {
+    //     return false;
+    //   }
+
+    return true;
+  };
+
   const client = await createDAVClient({
-    ...CALDAV_CONFIG,
+    serverUrl: "https://caldav.larkoffice.com",
+    credentials: { username: "caijin", password: "6RoWeALZjj" },
     authMethod: "Basic",
     defaultAccountType: "caldav",
   });
 
   const calendars = await client.fetchCalendars();
-  const calendarObjectsPromises = calendars.map((calendar) =>
-    client.fetchCalendarObjects({ calendar })
-  );
-  const allCalendarObjects = (await Promise.all(calendarObjectsPromises)).flat();
-  const filteredEvents = [];
+  const objects = await client.fetchCalendarObjects({ calendar: calendars[0] });
 
-  // 处理单个事件
-  const processEvent = (event, startDate, endDate) => {
-    if (startDate >= RANGE_START && endDate <= RANGE_END) {
-      const item = {
+  const cal = icalGen({ name: "Filtered CalDAV" });
+
+  const calCreateEvent = (event) => {
+    if (
+      getIsMatch({
         summary: event.summary,
         description: event.description,
-        location: event.location,
-        uid: event.uid,
-        organizer: event.organizer?.val,
-      };
-
-      const isMatch = !filterFields.some((field) => {
-        const value = item[field];
-        return value && filterRules.some((rule) => {
-          if (Array.isArray(rule[field])) {
-            return rule[field].some((r) => value.includes(r));
-          }
-          return value.includes(rule[field]);
-        });
+      })
+    ) {
+      cal.createEvent({
+        ...event,
       });
-
-      if (isMatch) {
-        filteredEvents.push({
-          start: startDate,
-          end: endDate,
-          ...item,
-        });
-      }
     }
   };
 
-  if (isDirectRun) {
-    fs.writeFileSync("log/allCalendarObjects.json", JSON.stringify(allCalendarObjects, null, 2));
-  }
-
-  for (const obj of allCalendarObjects) {
+  for (const obj of objects) {
     try {
-      const jcalData = ICAL.parse(obj.data);
-      const comp = new ICAL.Component(jcalData);
-      const vevent = comp.getFirstSubcomponent("vevent");
+      const jcal = ICAL.parse(obj.data);
+      const comp = new ICAL.Component(jcal);
+      const vevents = comp.getAllSubcomponents("vevent");
 
-      if (vevent) {
-        const event = new ICAL.Event(vevent);
+      const eventsByUID = {};
+      for (const v of vevents) {
+        const e = new ICAL.Event(v);
+        const uid = e.uid;
+        if (!eventsByUID[uid])
+          eventsByUID[uid] = { master: null, overrides: [] };
+        if (e.recurrenceId) {
+          eventsByUID[uid].overrides.push(e);
+        } else {
+          eventsByUID[uid].master = e;
+        }
+      }
 
-        if (event.isRecurring()) {
-          // 获取已排除的日期
-          const excludedDates = new Set();
-          const exdates = vevent.getAllProperties("exdate");
-          
-          for (const exdate of exdates) {
-            const value = exdate.getFirstValue();
-            // 处理 UTC 时间（带 Z）
-            if (value.toString().endsWith('Z')) {
-              const time = value.toJSDate();
-              // 转换为本地时间进行比较
-              const localTime = new Date(time.getTime() + time.getTimezoneOffset() * 60000);
-              excludedDates.add(localTime.toISOString().split('T')[0]);
-            } else if (value.timezone) {
-              // 处理带时区的情况
-              const time = value.toJSDate();
-              excludedDates.add(time.toISOString().split('T')[0]);
-            } else {
-              // 处理不带时区的情况
-              excludedDates.add(value.toString().split('T')[0]);
+      for (const { master, overrides } of Object.values(eventsByUID)) {
+        if (!master && overrides.length > 0) {
+          // fallback：只处理单个 override，不展开 recurrence
+          for (const o of overrides) {
+            const eventObj = {
+              start: o.startDate.toJSDate(),
+              end: o.endDate.toJSDate(),
+              summary: o.summary,
+              description: o.description,
+              uid: o.uid,
+              location: o.component.getFirstPropertyValue("location"),
+            };
+
+            if (getIsMatch(eventObj)) {
+              calCreateEvent(eventObj);
             }
           }
+          continue;
+        }
 
-          // 处理重复事件
-          const iterator = event.iterator();
+        const exdates = new Set(
+          master.component
+            .getAllProperties("exdate")
+            .map((p) => p.getFirstValue().toJSDate().toISOString())
+        );
+
+        if (master.isRecurring()) {
+          const recurExpansion = new ICAL.RecurExpansion({
+            component: master.component,
+            dtstart: master.startDate,
+          });
+
           let next;
-          while ((next = iterator.next()) && next.toJSDate() <= RANGE_END) {
-            const startDate = next.toJSDate();
-            // 转换为本地时间进行比较
-            const localStartDate = new Date(startDate.getTime() + startDate.getTimezoneOffset() * 60000);
-            const startDateStr = localStartDate.toISOString().split('T')[0];
-            
-            if (!excludedDates.has(startDateStr)) {
-              const endDate = event.getOccurrenceDetails(next).endDate.toJSDate();
-              processEvent(event, startDate, endDate);
+          while ((next = recurExpansion.next())) {
+            const dt = next.toJSDate();
+            if (dt > new Date("2025-12-31")) break;
+            if (exdates.has(dt.toISOString())) continue;
+
+            const override = overrides.find(
+              (o) => o.recurrenceId.compare(next) === 0
+            );
+            const e = override || master;
+
+            if (override) {
+              // 使用 override 自己的 start/end
+              calCreateEvent({
+                start: override.startDate.toJSDate(),
+                end: override.endDate.toJSDate(),
+                summary: override.summary,
+                description: override.description,
+                uid: override.uid,
+                location: override.component.getFirstPropertyValue("location"),
+              });
+            } else {
+              // 默认用 master 的展开时间点 + 持续时长
+              calCreateEvent({
+                start: dt,
+                end: new Date(
+                  dt.getTime() +
+                    (master.endDate.toJSDate() - master.startDate.toJSDate())
+                ),
+                summary: master.summary,
+                description: master.description,
+                uid: master.uid,
+                location: master.component.getFirstPropertyValue("location"),
+              });
             }
           }
         } else {
-          // 处理单次事件
-          const startDate = event.startDate.toJSDate();
-          const endDate = event.endDate.toJSDate();
-          processEvent(event, startDate, endDate);
+          // 单次非重复事件
+          calCreateEvent({
+            start: master.startDate.toJSDate(),
+            end: master.endDate.toJSDate(),
+            summary: master.summary,
+            description: master.description,
+            uid: master.uid,
+            location: master.component.getFirstPropertyValue("location"),
+          });
         }
       }
     } catch (err) {
-      console.log("⚠️ Failed to parse calendar object:", err);
+      console.error("⚠️ Error processing calendar object:", err);
     }
   }
 
-  return filteredEvents;
+  return cal.toString();
 }
-
-export const getFilteredCal = async () => {
-  const events = await fetchAndFilterEvents();
-  const cal = icalGen({ name: "Filtered Calendar" });
-
-  for (const e of events) {
-    cal.createEvent({
-      start: e.start,
-      end: e.end,
-      summary: e.summary,
-      description: e.description,
-      location: e.location,
-      uid: e.uid,
-      organizer: e.organizer?.val,
-    });
-  }
-
-  return cal;
-};
-
 
 console.log("### -> isDirectRun", isDirectRun);
 
 if (isDirectRun) {
   try {
     console.log("### -> start targetFilteredCal");
-    const cal = await getFilteredCal();
+
+    const calFiltered = await getFilteredCal({
+      filterConfig: FILTER_CONFIG,
+    });
+    fs.writeFileSync("log/filtered.ics", calFiltered);
+
     console.log("### -> end targetFilteredCal");
-    fs.writeFileSync("log/filtered.ics", cal.toString());
   } catch (err) {
     console.error("Error:", err);
     process.exit(1);
   }
 }
-
