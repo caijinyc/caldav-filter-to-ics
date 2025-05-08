@@ -9,7 +9,7 @@ dotenv.config();
 // 5 分钟缓存机制
 let cachedICS = null;
 let lastGeneratedTime = 0;
-const CACHE_TTL = 5 * 60 * 1000; // 5分钟
+const CACHE_TTL = 1 * 60 * 1000; // 1分钟
 
 // 日志文件路径
 const LOG_FILE_PATH = "api-requests.log";
