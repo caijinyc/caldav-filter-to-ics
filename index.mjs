@@ -167,7 +167,7 @@ export async function getFilteredCal({ filterConfig }) {
                 end: override.endDate.toJSDate(),
                 summary: override.summary,
                 description: override.description,
-                uid: override.uid,
+                // uid: override.uid,
                 location: override.component.getFirstPropertyValue("location"),
               });
             } else {
