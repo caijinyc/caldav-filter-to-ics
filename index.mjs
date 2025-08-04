@@ -162,23 +162,15 @@ export async function getFilteredCal({ filterConfig }) {
             const e = override || master;
 
             if (override) {
-              // 使用 override 自己的 start/end
-              // 为override事件生成基于日期和原始UID的稳定ID
-              const dateString = dt.toISOString().split('T')[0];
-              const stableUid = `${override.uid}_${dateString}`;
               calCreateEvent({
                 start: override.startDate.toJSDate(),
                 end: override.endDate.toJSDate(),
                 summary: override.summary,
                 description: override.description,
-                uid: stableUid,
+                uid: override.uid,
                 location: override.component.getFirstPropertyValue("location"),
               });
             } else {
-              // 默认用 master 的展开时间点 + 持续时长
-              // 为重复事件实例生成基于日期和原始UID的稳定ID
-              const dateString = dt.toISOString().split('T')[0];
-              const stableUid = `${master.uid}_${dateString}`;
               calCreateEvent({
                 start: dt,
                 end: new Date(
@@ -187,7 +179,7 @@ export async function getFilteredCal({ filterConfig }) {
                 ),
                 summary: master.summary,
                 description: master.description,
-                uid: stableUid,
+                uid: master.uid,
                 location: master.component.getFirstPropertyValue("location"),
               });
             }
