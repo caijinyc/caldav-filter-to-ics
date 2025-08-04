@@ -179,7 +179,7 @@ export async function getFilteredCal({ filterConfig }) {
                 ),
                 summary: master.summary,
                 description: master.description,
-                uid: master.uid,
+                // uid: master.uid,
                 location: master.component.getFirstPropertyValue("location"),
               });
             }
