@@ -31,6 +31,7 @@ export const FILTER_CONFIG = {
       // 商品
       "商品前端技术方案 & DogFooding",
       "商品前端技术方案&CR",
+      "商品前端敏捷周会",
       "商品前端上车CR",
     ],
     description: [
