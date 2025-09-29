@@ -13,24 +13,29 @@ const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
 // const RANGE_START = FILTER_CONFIG.range.start;
 // const RANGE_END = FILTER_CONFIG.range.end;
 
-// 读取 .env 文件中的配置
-const localEnv = require("dotenv").config();
-
-let CALDAV_USERNAME = localEnv.parsed.USERNAME;
-let CALDAV_PASSWORD = localEnv.parsed.PASSWORD;
-let CALDAV_SERVER_URL = localEnv.parsed.URL;
-
-const CALDAV_CONFIG = {
-  serverUrl: CALDAV_SERVER_URL,
-  credentials: {
-    username: CALDAV_USERNAME,
-    password: CALDAV_PASSWORD,
-  },
+const formatDateForUID = (value) => {
+  const date = value
+    ? value.toJSDate
+      ? value.toJSDate()
+      : new Date(value)
+    : null;
+  if (!date || Number.isNaN(date.valueOf())) return null;
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 };
 
-console.log("### -> CALDAV_CONFIG", CALDAV_CONFIG);
+const buildDeterministicUID = ({ baseUid, occurrenceKey }) => {
+  if (!baseUid) {
+    throw new Error("Missing base UID for calendar event");
+  }
 
-export async function getFilteredCal({ filterConfig }) {
+  if (!occurrenceKey) {
+    return baseUid;
+  }
+
+  return `${baseUid}__${occurrenceKey}`;
+};
+
+const generateFilteredCalendar = ({ calendarObjects, filterConfig }) => {
   const getIsMatch = ({ summary, description }) => {
     const { filter } = filterConfig;
 
@@ -73,19 +78,14 @@ export async function getFilteredCal({ filterConfig }) {
     return true;
   };
 
-  const client = await createDAVClient({
-    serverUrl: "https://caldav.larkoffice.com",
-    credentials: { username: "caijin", password: "6RoWeALZjj" },
-    authMethod: "Basic",
-    defaultAccountType: "caldav",
-  });
-
-  const calendars = await client.fetchCalendars();
-  const objects = await client.fetchCalendarObjects({ calendar: calendars[0] });
-
   const cal = icalGen({ name: "Filtered CalDAV" });
 
-  const calCreateEvent = (event) => {
+  const calCreateEvent = (event, { baseUid, occurrenceKey } = {}) => {
+    const deterministicUid = buildDeterministicUID({
+      baseUid: baseUid ?? event.uid,
+      occurrenceKey,
+    });
+
     if (
       getIsMatch({
         summary: event.summary,
@@ -94,12 +94,12 @@ export async function getFilteredCal({ filterConfig }) {
     ) {
       cal.createEvent({
         ...event,
-        id: event.uid,
+        id: deterministicUid,
       });
     }
   };
 
-  for (const obj of objects) {
+  for (const obj of calendarObjects) {
     try {
       const jcal = ICAL.parse(obj.data);
       const comp = new ICAL.Component(jcal);
@@ -127,13 +127,13 @@ export async function getFilteredCal({ filterConfig }) {
               end: o.endDate.toJSDate(),
               summary: o.summary,
               description: o.description,
-              uid: o.uid,
               location: o.component.getFirstPropertyValue("location"),
             };
 
-            if (getIsMatch(eventObj)) {
-              calCreateEvent(eventObj);
-            }
+            calCreateEvent(eventObj, {
+              baseUid: o.uid,
+              occurrenceKey: formatDateForUID(o.recurrenceId ?? o.startDate),
+            });
           }
           continue;
         }
@@ -167,8 +167,12 @@ export async function getFilteredCal({ filterConfig }) {
                 end: override.endDate.toJSDate(),
                 summary: override.summary,
                 description: override.description,
-                // uid: override.uid,
                 location: override.component.getFirstPropertyValue("location"),
+              }, {
+                baseUid: override.uid,
+                occurrenceKey: formatDateForUID(
+                  override.recurrenceId ?? override.startDate
+                ),
               });
             } else {
               calCreateEvent({
@@ -179,8 +183,10 @@ export async function getFilteredCal({ filterConfig }) {
                 ),
                 summary: master.summary,
                 description: master.description,
-                // uid: master.uid,
                 location: master.component.getFirstPropertyValue("location"),
+              }, {
+                baseUid: master.uid,
+                occurrenceKey: formatDateForUID(dt),
               });
             }
           }
@@ -202,7 +208,26 @@ export async function getFilteredCal({ filterConfig }) {
   }
 
   return cal.toString();
+};
+
+export async function getFilteredCal({ filterConfig }) {
+  const client = await createDAVClient({
+    serverUrl: "https://caldav.larkoffice.com",
+    credentials: { username: "caijin", password: "6RoWeALZjj" },
+    authMethod: "Basic",
+    defaultAccountType: "caldav",
+  });
+
+  const calendars = await client.fetchCalendars();
+  const objects = await client.fetchCalendarObjects({ calendar: calendars[0] });
+
+  return generateFilteredCalendar({
+    calendarObjects: objects,
+    filterConfig,
+  });
 }
+
+export { generateFilteredCalendar, buildDeterministicUID };
 
 console.log("### -> isDirectRun", isDirectRun);
 
@@ -213,6 +238,7 @@ if (isDirectRun) {
     const calFiltered = await getFilteredCal({
       filterConfig: FILTER_CONFIG,
     });
+    fs.mkdirSync("log", { recursive: true });
     fs.writeFileSync("log/filtered.ics", calFiltered);
 
     console.log("### -> end targetFilteredCal");
